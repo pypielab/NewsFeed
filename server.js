@@ -5,6 +5,14 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
+// .env 로드 (이미 설정된 환경 변수는 덮어쓰지 않음). 키 값은 어디에도 출력하지 않는다.
+try {
+  for (const line of fs.readFileSync(path.join(__dirname, '.env'), 'utf8').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/i);
+    if (m && !line.trim().startsWith('#') && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
+  }
+} catch { /* .env 없음 */ }
+
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
 const KW_FILE = path.join(DATA_DIR, 'keywords.json');
@@ -338,6 +346,161 @@ function schedule() {
   timer = setInterval(() => settings.keywords.length && collect(), Math.max(20, settings.intervalSec) * 1000);
 }
 
+// ---------- LLM (Gemini 무료 등급) ----------
+// 한도: 모델별 RPM/RPD 가 따로 있고 프로젝트 단위로 적용된다. 하루 한도는 태평양 시간 자정에 초기화.
+// 그래서 (1) 모델별 하루 호출 상한을 두고 (2) 호출 간격을 벌리고 (3) 실패하면 다음 모델로 넘어간다.
+const LLM_FILE = path.join(DATA_DIR, 'llm-usage.json');
+const JUDGE_FILE = path.join(DATA_DIR, 'llm-judgments.json');
+const llmCfg = () => ({
+  key: process.env.GEMINI_API_KEY || '',
+  models: (process.env.GEMINI_MODELS || 'gemini-3.1-flash-lite,gemini-3.5-flash-lite').split(',').map((x) => x.trim()).filter(Boolean),
+  cap: Number(process.env.LLM_DAILY_CAP) || 300,
+});
+const ptDay = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());   // 예: 2026-10-14
+let llmUsage = readJson(LLM_FILE, { day: '', counts: {} });
+const usageNow = () => { if (llmUsage.day !== ptDay()) llmUsage = { day: ptDay(), counts: {} }; return llmUsage; };
+const bumpUsage = (model) => { const u = usageNow(); u.counts[model] = (u.counts[model] || 0) + 1; fs.writeFile(LLM_FILE, JSON.stringify(u), () => {}); };
+let judgments = readJson(JUDGE_FILE, {});                       // { "그룹|용어": { verdict, reason, at } }
+const saveJudgments = () => fs.writeFile(JUDGE_FILE, JSON.stringify(judgments), () => {});
+let judgeVersion = 0;
+
+let lastLlmAt = 0, llmChain = Promise.resolve();
+const llmGate = () => (llmChain = llmChain.then(async () => {            // 호출을 직렬화하고 최소 간격(분당 ≤13회)을 보장
+  const wait = lastLlmAt + 4600 - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastLlmAt = Date.now();
+}));
+
+function llmStatus() {
+  const c = llmCfg(), u = usageNow();
+  return { enabled: !!c.key, models: c.models, cap: c.cap, used: Object.fromEntries(c.models.map((m) => [m, u.counts[m] || 0])), day: u.day };
+}
+
+// prompt → JSON(스키마 고정). 실패 시 다음 모델로.
+async function llmJson(prompt, schema) {
+  const c = llmCfg();
+  if (!c.key) throw new Error('GEMINI_API_KEY 가 설정되지 않았습니다 (.env 확인)');
+  let lastErr = new Error('사용 가능한 모델이 없습니다');
+  for (const model of c.models) {
+    if ((usageNow().counts[model] || 0) >= c.cap) { lastErr = new Error(`${model}: 오늘 호출 상한(${c.cap}) 도달`); continue; }
+    await llmGate();
+    bumpUsage(model);                                                     // 실패해도 보수적으로 센다
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': c.key },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json', responseSchema: schema, temperature: 0.1 },
+        }),
+        signal: AbortSignal.timeout(60000),
+      });
+      if (res.status === 429 || res.status >= 500) { lastErr = new Error(`${model}: HTTP ${res.status} (한도/혼잡)`); continue; }
+      if (!res.ok) { const t = await res.text(); throw new Error(`${model}: HTTP ${res.status} ${t.slice(0, 160)}`); }
+      const j = await res.json();
+      const text = (((j.candidates || [])[0] || {}).content || {}).parts;
+      if (!text) throw new Error(`${model}: 빈 응답`);
+      return { model, data: JSON.parse(text.map((p) => p.text || '').join('')) };
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
+// 추천 후보가 "이 모니터링 범위에 맞는 검색 키워드인가"를 판정
+async function judgeCandidates(group) {
+  const sugg = buildSuggestions();
+  const g = sugg.groups.find((x) => x.group === group);
+  if (!g || !g.items.length) return { judged: 0 };
+  const todo = g.items.filter((i) => !i.ai).slice(0, 30);
+  if (!todo.length) return { judged: 0 };
+  const prompt = `당신은 뉴스 모니터링 키워드 큐레이터입니다.
+모니터링 범위는 사용자가 등록한 아래 키워드로 정의됩니다.
+등록 키워드: ${g.seeds.join(', ') || '(없음)'}
+
+아래 "후보 용어"가 이 범위의 뉴스를 찾는 데 쓸 검색 키워드로 적합한지 판정하세요. 각 후보에는 실제 기사 제목 예시가 있습니다.
+- relevant: 범위와 직접 관련된 구체적인 용어(사건, 기관, 기법, 제품, 규제 등). 검색 키워드로 추가할 가치가 있음
+- generic: 너무 일반적이라 검색 키워드로 부적합(예: 사고, 피해, 추가, 점검 같은 흔한 단어)
+- offtopic: 범위와 무관한 주제
+reason 은 한국어 한 문장(30자 이내). 후보 목록의 term 을 그대로 사용하세요.
+
+후보 용어:
+${JSON.stringify(todo.map((i) => ({ term: i.term, 기사수: i.df, 제목예시: i.samples.map((x) => x.title) })))}`;
+  const schema = {
+    type: 'ARRAY',
+    items: { type: 'OBJECT', properties: { term: { type: 'STRING' }, verdict: { type: 'STRING', enum: ['relevant', 'generic', 'offtopic'] }, reason: { type: 'STRING' } }, required: ['term', 'verdict', 'reason'] },
+  };
+  const { model, data } = await llmJson(prompt, schema);
+  let n = 0;
+  const valid = new Set(todo.map((i) => i.term));
+  for (const r of Array.isArray(data) ? data : []) {
+    if (!valid.has(r.term) || !['relevant', 'generic', 'offtopic'].includes(r.verdict)) continue;
+    judgments[group + '|' + r.term] = { verdict: r.verdict, reason: String(r.reason || '').slice(0, 80), model, at: Date.now() };
+    n++;
+  }
+  if (n) { saveJudgments(); judgeVersion++; }
+  return { judged: n, asked: todo.length, model };
+}
+
+// ---------- 카테고리 브리핑 (Gemini) ----------
+// 카테고리의 최신 기사 제목(중요 기사 우선)을 모델에 보내 "지금 무슨 일이 일어나는가"를 요약한다.
+// 사용자가 버튼을 눌렀을 때만 생성하며, 같은 상태에서는 30분간 저장본을 재사용해 호출을 아낀다.
+const BRIEF_FILE = path.join(DATA_DIR, 'llm-briefings.json');
+let briefs = readJson(BRIEF_FILE, {});                        // { 그룹: { headline, topics, watch, at, model, count, used } }
+const saveBriefs = () => fs.writeFile(BRIEF_FILE, JSON.stringify(briefs), () => {});
+const briefBusy = new Set();
+
+async function makeBrief(group, force) {
+  const gOf = (k) => settings.groupOf[k] || '';
+  const seeds = settings.keywords.filter((k) => gOf(k) === group);
+  const pool = articles.filter((a) => a.keywords.some((k) => gOf(k) === group));
+  if (!pool.length) throw new Error('이 카테고리에 수집된 기사가 없습니다');
+  const prev = briefs[group];
+  if (!force && prev && Date.now() - prev.at < 30 * 60 * 1000 && prev.count === pool.length) return { ...prev, reused: true };
+  if (briefBusy.has(group)) throw new Error('이미 생성 중입니다');
+  briefBusy.add(group);
+  try {
+    const joint = (a) => a.keywords.filter((k) => gOf(k) === group).length >= 2;
+    const picked = pool.slice().sort((a, b) => (joint(b) - joint(a)) || (b.time - a.time)).slice(0, 60);   // 중요 기사 우선, 최대 60건
+    const hhmm = (t) => new Date(t).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const lines = picked.map((a, i) => `${i + 1}. [${hhmm(a.time)}] ${a.title}${a.press ? ` (${a.press})` : ''}${joint(a) ? ' ★' : ''}`);
+    const prompt = `당신은 뉴스 모니터링 요약 담당자입니다.
+모니터링 범위는 사용자가 등록한 키워드로 정의됩니다: ${seeds.join(', ') || '(없음)'}
+아래는 오늘 수집된 기사 제목 목록입니다(번호, 시각, 제목, 언론사). ★ 표시는 여러 등록 키워드에 동시에 잡힌 기사입니다.
+
+지금 무슨 일이 일어나고 있는지 브리핑하세요.
+- headline: 오늘 흐름을 한 문장(60자 이내)으로 요약
+- topics: 주요 주제 3~5개. 같은 사건을 다룬 기사들은 하나의 주제로 묶고, 각 주제마다 title(20자 이내), summary(1~2문장), articles(근거가 되는 기사 번호 1~5개)를 작성
+- watch: 앞으로 주목할 점 0~3개(각 한 문장). 제목에서 근거를 찾을 수 없으면 비워 두세요
+반드시 제목에 있는 내용만 사용하고, 제목에 없는 사실·수치·원인을 추측해서 쓰지 마세요. 한국어로 작성하세요.
+
+기사 목록:
+${lines.join('\n')}`;
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        headline: { type: 'STRING' },
+        topics: { type: 'ARRAY', items: { type: 'OBJECT', properties: { title: { type: 'STRING' }, summary: { type: 'STRING' }, articles: { type: 'ARRAY', items: { type: 'INTEGER' } } }, required: ['title', 'summary', 'articles'] } },
+        watch: { type: 'ARRAY', items: { type: 'STRING' } },
+      },
+      required: ['headline', 'topics', 'watch'],
+    };
+    const { model, data } = await llmJson(prompt, schema);
+    const brief = {
+      headline: String(data.headline || '').slice(0, 200),
+      topics: (Array.isArray(data.topics) ? data.topics : []).slice(0, 6).map((t) => ({
+        title: String(t.title || '').slice(0, 60),
+        summary: String(t.summary || '').slice(0, 400),
+        articleIds: [...new Set((Array.isArray(t.articles) ? t.articles : []).map((n) => picked[n - 1] && picked[n - 1].id).filter(Boolean))].slice(0, 5),
+      })).filter((t) => t.title && t.summary),
+      watch: (Array.isArray(data.watch) ? data.watch : []).slice(0, 3).map((x) => String(x).slice(0, 200)).filter(Boolean),
+      at: Date.now(), model, count: pool.length, used: picked.length,
+    };
+    briefs[group] = brief;
+    saveBriefs();
+    return brief;
+  } finally { briefBusy.delete(group); }
+}
+
 // ---------- 추천 키워드 후보 (시험) ----------
 // 카테고리별로, 이미 수집된 기사(제목+요약)에서 "자주·다양한 언론사에서·최근 늘어난" 단어/명사구를 찾아 후보로 올린다.
 // 형태소 분석기 없이 조사 제거 + 불용어 규칙으로 근사한다 (품질은 실제 데이터로 확인 필요).
@@ -366,7 +529,7 @@ function tokenize(text) {
 
 let suggCache = { key: '', at: 0, data: null };
 function buildSuggestions() {
-  const cacheKey = `${articles.length}:${settings.keywords.join()}:${(settings.dismissed || []).length}:${JSON.stringify(settings.groupOf)}`;
+  const cacheKey = `${articles.length}:${settings.keywords.join()}:${(settings.dismissed || []).length}:${JSON.stringify(settings.groupOf)}:${judgeVersion}`;
   if (suggCache.key === cacheKey && Date.now() - suggCache.at < 30000) return suggCache.data;
   const dismissed = new Set((settings.dismissed || []).map(normT));
   const kwNorm = settings.keywords.map(normT);
@@ -438,7 +601,9 @@ function buildSuggestions() {
       const score = s.df * Math.log(1 + s.presses.size) * idf * (0.5 + precision) * (0.3 + multiRate * 2) * (1 + 0.5 * burst) * (phrase ? 1.25 : 1);
       const together = {};
       for (const a of s.arts) for (const k of a.keywords) if (gOf(k) === g) together[k] = (together[k] || 0) + 1;
+      const jd = judgments[g + '|' + term];
       items.push({
+        ai: jd && Date.now() - jd.at < 3 * DAY ? { verdict: jd.verdict, reason: jd.reason } : null,
         term, df: s.df, titleDf: s.title, presses: s.presses.size, recent3h: s.recent, trend: Math.round(trendRatio * 10) / 10,
         seedCount: s.seeds.size, multi: s.multi, fit: Math.round(multiRate * 100), precision: Math.round(precision * 100), score: Math.round(score * 10) / 10,
         together: Object.entries(together).sort((x, y) => y[1] - x[1]).slice(0, 3).map(([k]) => k),
@@ -490,6 +655,23 @@ http.createServer(async (req, res) => {
       if (!a) return json(res, 404, { error: '기사를 찾을 수 없습니다' });
       return json(res, 200, await getReader(a));
     }
+    if (u.pathname === '/api/briefing' && req.method === 'GET') return json(res, 200, briefs);
+    if (u.pathname === '/api/briefing' && req.method === 'POST') {                  // 사용자가 버튼을 눌렀을 때만 외부(Gemini)로 전송
+      const b = await body(req);
+      const group = String(b.group || '');
+      if (group && !settings.groups.includes(group)) return json(res, 404, { error: '없는 카테고리입니다' });
+      try { return json(res, 200, { group, brief: await makeBrief(group, !!b.force), llm: llmStatus() }); }
+      catch (e) { return json(res, 502, { error: String(e.message || e), llm: llmStatus() }); }
+    }
+    if (u.pathname === '/api/llm/status' && req.method === 'GET') return json(res, 200, llmStatus());
+    if (u.pathname === '/api/suggestions/judge' && req.method === 'POST') {       // 사용자가 버튼을 눌렀을 때만 외부(Gemini)로 전송
+      const groups = buildSuggestions().groups.map((x) => x.group);
+      const results = [], errors = [];
+      for (const g of groups) {
+        try { results.push({ group: g, ...(await judgeCandidates(g)) }); } catch (e) { errors.push(String(e.message || e)); break; }
+      }
+      return json(res, 200, { ...buildSuggestions(), judge: { results, errors }, llm: llmStatus() });
+    }
     if (u.pathname === '/api/suggestions' && req.method === 'GET') return json(res, 200, buildSuggestions());
     if (u.pathname === '/api/suggestions/dismiss' && req.method === 'POST') {
       const term = String((await body(req)).term || '').trim();
@@ -539,6 +721,7 @@ http.createServer(async (req, res) => {
     if (u.pathname === '/api/groups' && req.method === 'DELETE') {         // 그룹 삭제: 소속 키워드는 미분류로
       const name = u.searchParams.get('name');
       settings.groups = settings.groups.filter((g) => g !== name);
+      if (briefs[name]) { delete briefs[name]; saveBriefs(); }
       for (const k of Object.keys(settings.groupOf)) if (settings.groupOf[k] === name) delete settings.groupOf[k];
       saveSettings();
       return jsonState(res);

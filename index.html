@@ -94,6 +94,21 @@ h1 b{font-weight:800}
 .mgcard input{padding:9px 14px;border:1px solid var(--line);border-radius:999px;background:var(--side);outline:0;min-width:0}
 .mgcard input:focus{border-color:var(--indigo);background:#fff}
 .mgcard .ki{flex:2 1 280px}.mgcard .gi{flex:1 1 160px}
+.brief{border:1px solid var(--line);border-left:4px solid var(--indigo);border-radius:12px;padding:14px 18px;margin:4px 0 16px;background:linear-gradient(135deg,#f7f8fd,#fff)}
+.bh{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.bh b{font-size:14px;font-weight:800}
+.aitag{font-size:10px;font-weight:800;color:var(--indigo);background:#eef1fb;padding:1px 8px;border-radius:999px}
+.bh .grow{flex:1}.bh .when{font-size:11.5px;color:var(--mute)}
+.bhead{margin:10px 0 4px;font-size:15px;font-weight:700;line-height:1.45}
+.bt{padding:9px 0;border-top:1px solid var(--line)}
+.bt h5{margin:0 0 2px;font-size:13.5px;font-weight:800;color:var(--indigo)}
+.bt p{margin:0 0 5px;font-size:13.5px;color:#3a4160;line-height:1.55}
+.bl{display:flex;flex-wrap:wrap;gap:5px}
+.bl button{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;padding:2px 9px;border-radius:999px;background:var(--soft);color:#4a5170}
+.bl button:hover{background:var(--indigo);color:#fff}
+.bw{margin:6px 0 0;padding:8px 12px;border-radius:8px;background:#fef9e7;font-size:12.5px;color:#7a5a05}
+.bw b{font-weight:800}.bw div{margin-top:2px}
+.bnew{font-size:11.5px;font-weight:800;color:#c2410c}
 .sgroup{margin-top:14px}
 .sgh{display:flex;align-items:baseline;gap:10px;margin-bottom:4px}
 .sgh b{font-size:14px;font-weight:800}
@@ -107,6 +122,14 @@ h1 b{font-weight:800}
 .up{color:#c2410c;font-weight:800}
 .ssamp{margin-top:3px;font-size:12px;color:#6a7190;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .together{margin-top:3px;font-size:11.5px;color:var(--indigo)}
+.aib{display:inline-block;font-size:10.5px;font-weight:800;padding:1px 8px;border-radius:999px;margin-left:8px}
+.aib.relevant{background:#e3f5ec;color:#15803d}.aib.generic{background:#eef0f7;color:#6b7390}.aib.offtopic{background:#fde8e8;color:#b91c1c}
+.airs{margin-top:3px;font-size:12px;color:#4a5170}
+.srow.dim{opacity:.55}
+.aibar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 2px;padding:10px 12px;border-radius:10px;background:var(--side);font-size:12.5px}
+.aibar label{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+.aibar input{accent-color:var(--indigo);margin:0}
+.btn:disabled,.ghost:disabled{opacity:.5;cursor:default}
 .sact{display:flex;gap:6px;flex:none}
 .sact .btn{padding:6px 14px;font-size:12px}
 .ghost{padding:6px 12px;border-radius:999px;border:1px solid var(--line);font-size:12px;font-weight:700;color:#5a617c}
@@ -228,6 +251,7 @@ h1 b{font-weight:800}
     <div class="view" id="vNews">
       <div class="head"><h1><b>Main</b> news<span class="sub" id="stat"></span></h1><div class="crumb" id="crumb"></div></div>
       <div class="scroll" id="scroll">
+        <div id="brief"></div>
         <div class="list" id="grid"></div>
         <button class="loadmore" id="loadmore" hidden>더 보기</button>
       </div>
@@ -253,6 +277,11 @@ h1 b{font-weight:800}
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="margin:0">추천 키워드 <span class="evi weak">시험 기능</span></h3><span style="flex:1"></span>
             <button class="ghost" id="suggReload">다시 계산</button><button class="ghost" id="suggReset" title="무시했던 후보를 다시 보이게 합니다">무시 목록 초기화</button></div>
           <p class="hint" style="margin-top:6px">카테고리별로 수집된 기사에서 자주·여러 언론사에서·키워드 2개 이상과 함께 나온 단어를 추천합니다. 승인한 것만 키워드로 등록됩니다.</p>
+          <div class="aibar" id="aibar">
+            <button class="btn" id="suggAI" disabled>✨ AI로 판정</button>
+            <label title="AI가 '일반어' 또는 '무관'으로 판정한 후보를 숨깁니다"><input type="checkbox" id="aiHide" checked>일반어·무관 숨기기</label>
+            <span class="sub" id="llmInfo" style="margin:0"></span>
+          </div>
           <div id="sugg"><span class="sub" style="margin:0">불러오는 중…</span></div>
         </div>
       </div>
@@ -264,7 +293,7 @@ h1 b{font-weight:800}
 
 <script>
 const $ = (id) => document.getElementById(id);
-const S = { keywords: [], groups: [], groupOf: {}, articles: [], labels: {}, sources: {}, active: null, enabled: {}, fresh: new Set(), sel: null, shown: 40, view: 'news', open: new Set() };
+const S = { keywords: [], groups: [], groupOf: {}, articles: [], labels: {}, sources: {}, active: null, enabled: {}, fresh: new Set(), sel: null, shown: 40, view: 'news', open: new Set(), briefs: {}, briefOpen: true, briefBusy: false };
 try { S.open = new Set(JSON.parse(localStorage.openG || '[]')); } catch { /* 저장값 없음 */ }
 const saveOpen = () => { try { localStorage.openG = JSON.stringify([...S.open]); } catch { /* 무시 */ } };
 const IMP = '__imp';
@@ -313,6 +342,54 @@ function cardHtml(a) {
   </button>`;
 }
 
+// ----- 카테고리 브리핑 -----
+const briefGroup = () => {                                  // 지금 보는 필터가 속한 카테고리 (전체/중요 전체에서는 없음)
+  const a = S.active || '';
+  if (a.startsWith(IMPP)) return a.slice(IMPP.length);
+  if (a.startsWith(GP)) return a.slice(GP.length);
+  return S.keywords.includes(a) ? gOf(a) : null;
+};
+function renderBrief() {
+  const box = $('brief'), g = briefGroup();
+  if (g === null || S.view !== 'news') { box.innerHTML = ''; return; }
+  const name = g || '미분류', b = S.briefs[g];
+  const poolN = S.articles.filter((x) => inGroup(x, g)).length;
+  const fresh = b ? poolN - b.count : 0;
+  const when = b ? `${ago(b.at)} 생성 · 기사 ${b.used}건 기준` : '';
+  let body = '';
+  if (S.briefOpen) {
+    if (b) {
+      body = `<div class="bhead">${esc(b.headline)}</div>` +
+        b.topics.map((t) => `<div class="bt"><h5>${esc(t.title)}</h5><p>${esc(t.summary)}</p><div class="bl">${
+          t.articleIds.map((id) => S.articles.find((x) => x.id === id)).filter(Boolean).map((x) => `<button data-bid="${x.id}" title="${esc(x.title)}">${esc(x.title)}</button>`).join('')}</div></div>`).join('') +
+        (b.watch.length ? `<div class="bw"><b>주목할 점</b>${b.watch.map((w) => `<div>· ${esc(w)}</div>`).join('')}</div>` : '');
+    } else {
+      body = `<div class="sub" style="margin:8px 0 0">AI가 ${esc(name)} 카테고리의 최신 기사 제목을 읽고 오늘의 흐름을 요약합니다. 버튼을 누르면 등록 키워드와 기사 제목이 Google Gemini로 전송됩니다.</div>`;
+    }
+  }
+  box.innerHTML = `<div class="brief"><div class="bh"><b>✨ ${esc(name)} 브리핑</b><span class="aitag">AI 생성</span><span class="when">${esc(when)}</span>${fresh > 0 ? `<span class="bnew">새 기사 ${fresh}건</span>` : ''}<span class="grow"></span>
+    <button class="ghost" data-bgen="1" ${S.briefBusy || !poolN ? 'disabled' : ''}>${S.briefBusy ? '생성 중…' : b ? '다시 생성' : '브리핑 생성'}</button>
+    <button class="ghost" data-btoggle="1" title="접기/펼치기">${S.briefOpen ? '접기' : '펼치기'}</button></div>${body}</div>`;
+}
+$('brief').addEventListener('click', async (e) => {
+  const open = e.target.closest('[data-bid]'); if (open) return openReader(open.dataset.bid);
+  if (e.target.closest('[data-btoggle]')) { S.briefOpen = !S.briefOpen; return renderBrief(); }
+  if (!e.target.closest('[data-bgen]')) return;
+  const g = briefGroup(); if (g === null || S.briefBusy) return;
+  if (!llm || !llm.enabled) { await loadLlm(); if (!llm || !llm.enabled) return alert('.env 에 GEMINI_API_KEY 를 넣고 서버를 다시 시작하세요.'); }
+  if (!llmConfirmed) {
+    if (!confirm('브리핑을 만들면 아래 내용이 Google Gemini(무료 등급)로 전송됩니다.\n\n• 해당 카테고리의 등록 키워드\n• 최신 기사 제목·언론사(최대 60건)\n\n무료 등급에 보낸 내용은 Google 제품 개선에 사용될 수 있습니다. 계속할까요?')) return;
+    llmConfirmed = true;
+  }
+  S.briefBusy = true; renderBrief();
+  try {
+    const r = await api('/api/briefing', 'POST', { group: g, force: true });
+    if (r.error) alert('브리핑 생성에 실패했습니다:\n' + r.error); else { S.briefs[g] = r.brief; S.briefOpen = true; }
+    if (r.llm) llm = r.llm;
+  } catch { alert('브리핑 요청에 실패했습니다.'); }
+  S.briefBusy = false; renderBrief();
+});
+
 function render() {
   // ----- 왼쪽 메뉴: 카테고리 드롭다운 -----
   const cnt = (k) => S.articles.filter((x) => x.keywords.includes(k)).length;
@@ -353,6 +430,7 @@ function render() {
 
   // ----- 현재 필터 표시 -----
   const crumb = !S.active ? '' : S.active === IMP ? '★ 중요 (전체 카테고리)' : S.active.startsWith(IMPP) ? `★ 중요 › ${gname(S.active.slice(IMPP.length))}` : S.active.startsWith(GP) ? gname(S.active.slice(GP.length)) : `${gname(gOf(S.active))} › ${S.active}`;
+  renderBrief();
   $('crumb').innerHTML = crumb ? `<span>${esc(crumb)}</span><button data-k="" title="필터 해제">✕</button>` : '';
 
   // 포털 토글
@@ -384,13 +462,20 @@ function renderSugg() {
   const d = suggData; if (!d) return;
   const html = (d.groups || []).map((g) => {
     const name = g.group || '미분류';
-    const rows = g.items.map((i) => `<div class="srow">
-      <div class="sm"><b>${esc(i.term)}</b><span class="smeta"><span>기사 ${i.df}건</span><span>언론사 ${i.presses}곳</span><span title="이 카테고리 키워드 2개 이상에 함께 잡힌 기사 비율">범위적합 ${i.fit}%</span>${i.trend >= 1.5 ? `<span class="up" title="최근 3시간 비중이 평균보다 높음">▲ 최근 증가</span>` : ''}</span>
+    const VS = { relevant: '✓ 관련', generic: '일반어', offtopic: '✕ 무관' };
+    const hide = $('aiHide').checked;
+    const ord = (i) => (i.ai ? { relevant: 0, generic: 2, offtopic: 3 }[i.ai.verdict] : 1);
+    const shown = g.items.filter((i) => !(hide && i.ai && i.ai.verdict !== 'relevant')).sort((a, b) => ord(a) - ord(b));
+    const hiddenN = g.items.length - shown.length;
+    const rows = shown.map((i) => `<div class="srow ${i.ai && i.ai.verdict !== 'relevant' ? 'dim' : ''}">
+      <div class="sm"><b>${esc(i.term)}</b>${i.ai ? `<span class="aib ${i.ai.verdict}" title="AI 판정">${VS[i.ai.verdict]}</span>` : ''}<span class="smeta"><span>기사 ${i.df}건</span><span>언론사 ${i.presses}곳</span><span title="이 카테고리 키워드 2개 이상에 함께 잡힌 기사 비율">범위적합 ${i.fit}%</span>${i.trend >= 1.5 ? `<span class="up" title="최근 3시간 비중이 평균보다 높음">▲ 최근 증가</span>` : ''}</span>
+        ${i.ai ? `<div class="airs">AI: ${esc(i.ai.reason)}</div>` : ''}
         <div class="together">함께 나온 키워드: ${i.together.map(esc).join(' · ') || '-'}</div>
         ${i.samples.map((x) => `<div class="ssamp">· ${esc(x.title)} <span style="color:var(--mute)">(${esc(x.press || '')})</span></div>`).join('')}</div>
       <div class="sact"><button class="btn" data-sadd="${esc(i.term)}" data-sg="${esc(g.group)}">+ 추가</button><button class="ghost" data-sno="${esc(i.term)}">무시</button></div></div>`).join('');
     return `<div class="sgroup"><div class="sgh"><b>${esc(name)}</b><span class="evi ${g.evidence}">${g.evidence === 'strong' ? '근거 충분' : '근거 약함'}</span><span class="sub" style="margin:0">기사 ${g.articles}건 분석 · 키워드 ${g.seeds.length}개 · 공동 기사 ${g.jointArticles}건</span></div>
       ${rows || '<div class="sub" style="margin:8px 0">아직 추천할 후보가 없습니다. 기사가 더 쌓이면 나타납니다.</div>'}
+      ${hiddenN ? `<div class="sub" style="margin:6px 0 0">AI가 일반어·무관으로 판정한 후보 ${hiddenN}건을 숨겼습니다. (위의 체크를 해제하면 보입니다)</div>` : ''}
       ${g.evidence === 'weak' && g.items.length ? '<div class="sub" style="margin:6px 0 0">※ 키워드 2개 이상에 함께 잡힌 기사가 적어 정확도가 낮을 수 있습니다.</div>' : ''}</div>`;
   }).join('');
   $('sugg').innerHTML = html || '<span class="sub" style="margin:0">키워드를 등록하고 기사가 수집되면 추천이 나타납니다.</span>';
@@ -407,6 +492,32 @@ $('sugg').addEventListener('click', async (e) => {
     suggData = { at: Date.now(), ...(await api('/api/suggestions/dismiss', 'POST', { term: no.dataset.sno })) }; renderSugg();
   }
 });
+let llm = null, llmConfirmed = false;
+async function loadLlm() {
+  try { llm = await api('/api/llm/status'); } catch { llm = null; }
+  const b = $('suggAI');
+  if (!llm || !llm.enabled) { b.disabled = true; b.title = '.env 에 GEMINI_API_KEY 를 넣고 서버를 다시 시작하세요'; $('llmInfo').textContent = 'AI 판정을 쓰려면 .env 에 GEMINI_API_KEY 가 필요합니다.'; return; }
+  b.disabled = false; b.title = '';
+  const used = Object.entries(llm.used).map(([m, n]) => `${m.replace('gemini-', '')} ${n}/${llm.cap}`).join(' · ');
+  $('llmInfo').textContent = `오늘 호출(안전 상한): ${used}`;
+}
+$('suggAI').onclick = async () => {
+  if (!llmConfirmed) {
+    if (!confirm('AI 판정을 실행하면 아래 내용이 Google Gemini(무료 등급)로 전송됩니다.\n\n• 해당 카테고리의 등록 키워드\n• 추천 후보 단어와 기사 제목 예시\n\n무료 등급에 보낸 내용은 Google 제품 개선에 사용될 수 있습니다. 계속할까요?')) return;
+    llmConfirmed = true;
+  }
+  const b = $('suggAI'); b.disabled = true; b.textContent = '판정 중…';
+  try {
+    const r = await api('/api/suggestions/judge', 'POST');
+    suggData = { at: Date.now(), ...r };
+    if (r.llm) llm = r.llm;
+    const errs = (r.judge && r.judge.errors) || [];
+    renderSugg(); await loadLlm();
+    if (errs.length) alert('일부 판정에 실패했습니다:\n' + errs.join('\n'));
+  } catch { alert('AI 판정 요청에 실패했습니다.'); }
+  b.textContent = '✨ AI로 판정'; await loadLlm();
+};
+$('aiHide').onchange = renderSugg;
 $('suggReload').onclick = () => loadSugg(true);
 $('suggReset').onclick = async () => { suggData = { at: Date.now(), ...(await api('/api/suggestions/reset', 'POST')) }; renderSugg(); };
 
@@ -417,7 +528,7 @@ function setView(v) {
   $('vManage').hidden = v !== 'manage';
   $('app').classList.remove('nav');
   render();
-  if (v === 'manage') loadSugg();
+  if (v === 'manage') { loadSugg(); loadLlm(); }
 }
 
 function setBusy(b) {
@@ -449,6 +560,7 @@ async function load() {
   Object.assign(S, { keywords: s.keywords, groups: s.groups || [], groupOf: s.groupOf || {}, articles: s.articles, labels: s.sourceLabels, sources: s.sources });
   $('iv').value = String(s.intervalSec);
   if (![...$('iv').options].some((o) => o.value == s.intervalSec)) $('iv').add(new Option(s.intervalSec + '초', s.intervalSec, true, true));
+  try { S.briefs = await api('/api/briefing'); } catch { /* 브리핑 없음 */ }
   setBusy(s.collecting); render();
 }
 function connect() {
