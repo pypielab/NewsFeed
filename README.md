@@ -47,17 +47,21 @@ PORT=8080 node server.js
 
 ### 설정
 
-1. `.env.example`을 `.env`로 복사하고 키를 채웁니다. (`.env`는 `.gitignore`에 포함되어 Git에 올라가지 않습니다.)
+왼쪽 메뉴 아래 **🔧 설정**에서 합니다. 서버를 다시 시작할 필요 없이 바로 적용됩니다.
 
-   ```
-   GEMINI_API_KEY=발급받은_키
-   # 선택: 사용할 모델(쉼표 구분, 앞쪽부터 사용하고 한도/오류 시 다음 모델로 넘어감)
-   # GEMINI_MODELS=gemini-3.1-flash-lite,gemini-3.5-flash-lite
-   # 선택: 모델당 하루 호출 상한(기본 300)
-   # LLM_DAILY_CAP=300
-   ```
+- **Gemini API 키** — 붙여넣고 `저장`. `연결 테스트`로 키가 유효한지 확인할 수 있습니다(생성 호출이 아니라 일일 호출 한도를 쓰지 않습니다). `키 삭제`로 지울 수 있습니다.
+- **모델 · 하루 호출 상한** — 앞에 적은 모델부터 사용하고, 한도·혼잡 오류가 나면 다음 모델로 넘어갑니다. 상한은 모델당 10~1000(기본 300)입니다.
 
-2. 서버를 다시 시작합니다.
+입력한 값은 이 PC의 `.env` 파일에 저장됩니다(`.env`는 `.gitignore`에 포함되어 Git에 올라가지 않습니다). 화면에는 키를 다시 보여주지 않고 뒤 4자리만 표시합니다. 파일을 직접 편집해도 됩니다(`.env.example` 참고).
+
+```
+GEMINI_API_KEY=발급받은_키
+# 선택
+# GEMINI_MODELS=gemini-3.1-flash-lite,gemini-3.5-flash-lite
+# LLM_DAILY_CAP=300
+```
+
+> 서버는 `127.0.0.1`에서만 접속되며, 설정·키 변경 같은 상태 변경 요청은 이 앱 화면에서 보낸 것만 허용합니다(다른 웹사이트가 보낸 요청은 거부).
 
 ### 기능
 
@@ -113,6 +117,12 @@ PORT=8080 node server.js
 | GET | `/api/llm/status` | AI 사용 가능 여부와 오늘 호출 수 |
 | POST | `/api/suggestions/judge` | 추천 후보 AI 판정 (외부 전송) |
 | GET / POST | `/api/briefing` | 저장된 브리핑 조회 / 카테고리 브리핑 생성 (외부 전송) |
+| GET | `/api/settings` | AI 설정 상태(키는 마스킹된 뒤 4자리만) |
+| POST | `/api/settings/llm` | API 키·모델·하루 상한 저장 (`.env` 에 기록) |
+| POST | `/api/settings/llm/test` | API 키 연결 테스트 |
+| DELETE | `/api/settings/llm-key` | 저장된 API 키 삭제 |
+
+상태를 바꾸는 요청(POST/DELETE)에는 `X-Feed: 1` 헤더가 필요하고, `Origin`이 서버 주소와 다르면 403으로 거부됩니다.
 
 ## 파일 구성
 

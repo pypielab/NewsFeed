@@ -441,6 +441,43 @@ ${JSON.stringify(todo.map((i) => ({ term: i.term, 기사수: i.df, 제목예시:
   return { judged: n, asked: todo.length, model };
 }
 
+// ---------- 설정: API 키 (.env) ----------
+// 키는 .env 에만 저장하고, 화면으로는 절대 돌려보내지 않는다(뒤 4자리만 표시).
+const ENV_FILE = path.join(__dirname, '.env');
+function writeEnv(updates) {                                    // 값이 null/'' 이면 해당 줄 삭제. 다른 줄과 주석은 그대로 둔다
+  let lines = [];
+  try { lines = fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/); } catch { /* 새로 만든다 */ }
+  while (lines.length && lines[lines.length - 1] === '') lines.pop();     // 끝의 빈 줄을 먼저 정리해야 새 줄이 중간에 끼지 않는다
+  for (const [k, v] of Object.entries(updates)) {
+    const idx = lines.findIndex((l) => new RegExp('^\\s*' + k + '\\s*=').test(l));
+    if (v === null || v === '') { if (idx >= 0) lines.splice(idx, 1); delete process.env[k]; }
+    else { if (idx >= 0) lines[idx] = k + '=' + v; else lines.push(k + '=' + v); process.env[k] = v; }
+  }
+  while (lines.length && lines[lines.length - 1] === '') lines.pop();
+  fs.writeFileSync(ENV_FILE, lines.join('\n') + '\n', { mode: 0o600 });
+}
+function keySource() {
+  try { if (/^\s*GEMINI_API_KEY\s*=\s*\S+/m.test(fs.readFileSync(ENV_FILE, 'utf8'))) return '.env'; } catch { /* 없음 */ }
+  return process.env.GEMINI_API_KEY ? 'system' : 'none';
+}
+function settingsView() {
+  const c = llmCfg(), k = c.key;
+  return {
+    llm: {
+      configured: !!k, masked: k ? '••••••••' + k.slice(-4) : '', source: keySource(),
+      models: c.models, cap: c.cap, status: llmStatus(),
+    },
+  };
+}
+async function testGeminiKey(key) {                             // 모델 목록 조회 — 생성 호출이 아니라서 일일 호출 한도를 쓰지 않는다
+  try {
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', { headers: { 'x-goog-api-key': key }, signal: AbortSignal.timeout(15000) });
+    if (res.ok) return { ok: true, message: '연결 성공: 키가 유효합니다.' };
+    let m = ''; try { m = JSON.parse(await res.text()).error.message || ''; } catch { /* 본문 없음 */ }
+    return { ok: false, message: `HTTP ${res.status}: ${m.split(key).join('***').slice(0, 140)}` };
+  } catch (e) { return { ok: false, message: '연결 실패: ' + String(e.message || e).split(key).join('***').slice(0, 140) }; }
+}
+
 // ---------- 카테고리 브리핑 (Gemini) ----------
 // 카테고리의 최신 기사 제목(중요 기사 우선)을 모델에 보내 "지금 무슨 일이 일어나는가"를 요약한다.
 // 사용자가 버튼을 눌렀을 때만 생성하며, 같은 상태에서는 30분간 저장본을 재사용해 호출을 아낀다.
@@ -635,6 +672,11 @@ const body = (req) => new Promise((r) => { let b = ''; req.on('data', (c) => (b 
 http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   try {
+    if (u.pathname.startsWith('/api/') && req.method !== 'GET') {
+      const host = String(req.headers.host || ''), origin = req.headers.origin;
+      const okHost = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+      if (!okHost || req.headers['x-feed'] !== '1' || (origin && origin !== 'http://' + host)) return json(res, 403, { error: '허용되지 않은 요청입니다' });
+    }
     if (u.pathname === '/api/stream') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       res.write(`event: status\ndata: ${JSON.stringify({ collecting: running, sources: sourceStatus })}\n\n`);
@@ -654,6 +696,39 @@ http.createServer(async (req, res) => {
       const a = articles.find((x) => x.id === u.searchParams.get('id'));
       if (!a) return json(res, 404, { error: '기사를 찾을 수 없습니다' });
       return json(res, 200, await getReader(a));
+    }
+    if (u.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, settingsView());
+    if (u.pathname === '/api/settings/llm' && req.method === 'POST') {
+      const b = await body(req), upd = {};
+      if (b.apiKey !== undefined && String(b.apiKey).trim() !== '') {
+        const k = String(b.apiKey).trim();
+        if (!/^[A-Za-z0-9_-]{20,200}$/.test(k)) return json(res, 400, { error: 'API 키 형식이 올바르지 않습니다 (영문·숫자·-·_ 만, 20자 이상)' });
+        upd.GEMINI_API_KEY = k;
+      }
+      if (b.models !== undefined) {
+        const m = String(b.models).split(',').map((x) => x.trim()).filter(Boolean);
+        if (!m.length || !m.every((x) => /^[a-z0-9][a-z0-9.\-]*$/.test(x))) return json(res, 400, { error: '모델 이름 형식이 올바르지 않습니다 (예: gemini-3.1-flash-lite, gemini-3.5-flash-lite)' });
+        upd.GEMINI_MODELS = m.join(',');
+      }
+      if (b.cap !== undefined) {
+        const n = Number(b.cap);
+        if (!Number.isInteger(n) || n < 10 || n > 1000) return json(res, 400, { error: '하루 호출 상한은 10~1000 사이 정수여야 합니다' });
+        upd.LLM_DAILY_CAP = String(n);
+      }
+      writeEnv(upd);
+      return json(res, 200, settingsView());
+    }
+    if (u.pathname === '/api/settings/llm-key' && req.method === 'DELETE') {
+      if (keySource() === 'system') return json(res, 400, { error: '시스템 환경 변수로 설정된 키라 여기서 삭제할 수 없습니다' });
+      writeEnv({ GEMINI_API_KEY: null });
+      return json(res, 200, settingsView());
+    }
+    if (u.pathname === '/api/settings/llm/test' && req.method === 'POST') {
+      const b = await body(req);
+      const key = b.apiKey && String(b.apiKey).trim() ? String(b.apiKey).trim() : llmCfg().key;
+      if (!key) return json(res, 200, { ok: false, message: '등록된 키가 없습니다' });
+      if (!/^[A-Za-z0-9_-]{20,200}$/.test(key)) return json(res, 200, { ok: false, message: 'API 키 형식이 올바르지 않습니다' });
+      return json(res, 200, await testGeminiKey(key));
     }
     if (u.pathname === '/api/briefing' && req.method === 'GET') return json(res, 200, briefs);
     if (u.pathname === '/api/briefing' && req.method === 'POST') {                  // 사용자가 버튼을 눌렀을 때만 외부(Gemini)로 전송
