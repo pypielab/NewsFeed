@@ -24,7 +24,7 @@ Node.js 18 이상이 필요합니다(개발은 v22에서 진행).
 node server.js
 ```
 
-브라우저에서 http://localhost:3000 을 엽니다. Windows에서는 `start.bat`을 실행해도 됩니다(브라우저도 함께 열립니다).
+브라우저에서 http://localhost:3000 을 엽니다. Windows에서는 `start.bat`, macOS에서는 `start.command`를 실행해도 됩니다(브라우저도 함께 열립니다). macOS는 처음에 `chmod +x start.command`가 필요할 수 있고, Node.js는 `brew install node` 또는 nodejs.org에서 설치합니다.
 
 포트를 바꾸려면 환경 변수 `PORT`를 지정합니다.
 
@@ -131,6 +131,7 @@ GEMINI_API_KEY=발급받은_키
 server.js      수집(4개 포털) · 중복 제거 · 본문 추출 · 추천 키워드 · Gemini 호출 · HTTP/SSE 서버
 index.html     화면 전체(HTML/CSS/JS 한 파일)
 start.bat      Windows 실행 스크립트
+start.command  macOS 실행 스크립트
 .env.example   환경 변수 예시 (.env 로 복사해서 사용)
 ```
 
