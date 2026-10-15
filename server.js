@@ -407,8 +407,8 @@ async function llmJson(prompt, schema) {
 }
 
 // 추천 후보가 "이 모니터링 범위에 맞는 검색 키워드인가"를 판정
-async function judgeCandidates(group) {
-  const sugg = buildSuggestions();
+async function judgeCandidates(group, scope = 'today') {
+  const sugg = buildSuggestions(scope);
   const g = sugg.groups.find((x) => x.group === group);
   if (!g || !g.items.length) return { judged: 0 };
   const todo = g.items.filter((i) => !i.ai).slice(0, 30);
@@ -481,20 +481,28 @@ async function testGeminiKey(key) {                             // 모델 목록
 // ---------- 카테고리 브리핑 (Gemini) ----------
 // 카테고리의 최신 기사 제목(중요 기사 우선)을 모델에 보내 "지금 무슨 일이 일어나는가"를 요약한다.
 // 사용자가 버튼을 눌렀을 때만 생성하며, 같은 상태에서는 30분간 저장본을 재사용해 호출을 아낀다.
+// 분석 범위: 'today' = 서버 PC 기준 오늘 0시 이후 기사, 'all' = 보관 중인 전체 기사
+const todayStart = () => new Date().setHours(0, 0, 0, 0);
+const scopeArts = (scope) => (scope === 'all' ? articles : articles.filter((a) => a.time >= todayStart()));
+const briefKey = (g, scope) => (scope === 'all' ? g + '#all' : g);
 const BRIEF_FILE = path.join(DATA_DIR, 'llm-briefings.json');
 let briefs = readJson(BRIEF_FILE, {});                        // { 그룹: { headline, topics, watch, at, model, count, used } }
 const saveBriefs = () => fs.writeFile(BRIEF_FILE, JSON.stringify(briefs), () => {});
+// 범위(scope) 도입 전에 만든 브리핑은 보관 전체 기사 기준이므로 '전체' 범위 키로 옮긴다
+for (const [k, v] of Object.entries(briefs)) if (v && v.scope === undefined && !k.endsWith('#all')) { briefs[k + '#all'] = { ...v, scope: 'all' }; delete briefs[k]; }
 const briefBusy = new Set();
 
-async function makeBrief(group, force) {
+async function makeBrief(group, force, scope = 'today') {
+  scope = scope === 'all' ? 'all' : 'today';
+  const bkey = briefKey(group, scope);
   const gOf = (k) => settings.groupOf[k] || '';
   const seeds = settings.keywords.filter((k) => gOf(k) === group);
-  const pool = articles.filter((a) => a.keywords.some((k) => gOf(k) === group));
-  if (!pool.length) throw new Error('이 카테고리에 수집된 기사가 없습니다');
-  const prev = briefs[group];
+  const pool = scopeArts(scope).filter((a) => a.keywords.some((k) => gOf(k) === group));
+  if (!pool.length) throw new Error(scope === 'today' ? '오늘 수집된 기사가 없습니다 (‘오늘만’을 끄면 이전 기사로 만들 수 있습니다)' : '이 카테고리에 수집된 기사가 없습니다');
+  const prev = briefs[bkey];
   if (!force && prev && Date.now() - prev.at < 30 * 60 * 1000 && prev.count === pool.length) return { ...prev, reused: true };
-  if (briefBusy.has(group)) throw new Error('이미 생성 중입니다');
-  briefBusy.add(group);
+  if (briefBusy.has(bkey)) throw new Error('이미 생성 중입니다');
+  briefBusy.add(bkey);
   try {
     const joint = (a) => a.keywords.filter((k) => gOf(k) === group).length >= 2;
     const picked = pool.slice().sort((a, b) => (joint(b) - joint(a)) || (b.time - a.time)).slice(0, 60);   // 중요 기사 우선, 최대 60건
@@ -502,7 +510,7 @@ async function makeBrief(group, force) {
     const lines = picked.map((a, i) => `${i + 1}. [${hhmm(a.time)}] ${a.title}${a.press ? ` (${a.press})` : ''}${joint(a) ? ' ★' : ''}`);
     const prompt = `당신은 뉴스 모니터링 요약 담당자입니다.
 모니터링 범위는 사용자가 등록한 키워드로 정의됩니다: ${seeds.join(', ') || '(없음)'}
-아래는 오늘 수집된 기사 제목 목록입니다(번호, 시각, 제목, 언론사). ★ 표시는 여러 등록 키워드에 동시에 잡힌 기사입니다.
+아래는 ${scope === 'today' ? '오늘' : '최근 며칠간'} 수집된 기사 제목 목록입니다(번호, 시각, 제목, 언론사). ★ 표시는 여러 등록 키워드에 동시에 잡힌 기사입니다.
 
 지금 무슨 일이 일어나고 있는지 브리핑하세요.
 - headline: 오늘 흐름을 한 문장(60자 이내)으로 요약
@@ -530,12 +538,12 @@ ${lines.join('\n')}`;
         articleIds: [...new Set((Array.isArray(t.articles) ? t.articles : []).map((n) => picked[n - 1] && picked[n - 1].id).filter(Boolean))].slice(0, 5),
       })).filter((t) => t.title && t.summary),
       watch: (Array.isArray(data.watch) ? data.watch : []).slice(0, 3).map((x) => String(x).slice(0, 200)).filter(Boolean),
-      at: Date.now(), model, count: pool.length, used: picked.length,
+      at: Date.now(), model, count: pool.length, used: picked.length, scope,
     };
-    briefs[group] = brief;
+    briefs[bkey] = brief;
     saveBriefs();
     return brief;
-  } finally { briefBusy.delete(group); }
+  } finally { briefBusy.delete(bkey); }
 }
 
 // ---------- 추천 키워드 후보 (시험) ----------
@@ -565,12 +573,14 @@ function tokenize(text) {
 }
 
 let suggCache = { key: '', at: 0, data: null };
-function buildSuggestions() {
-  const cacheKey = `${articles.length}:${settings.keywords.join()}:${(settings.dismissed || []).length}:${JSON.stringify(settings.groupOf)}:${judgeVersion}`;
+function buildSuggestions(scope = 'today') {
+  scope = scope === 'all' ? 'all' : 'today';
+  const base = scopeArts(scope);
+  const cacheKey = `${scope}:${base.length}:${settings.keywords.join()}:${(settings.dismissed || []).length}:${JSON.stringify(settings.groupOf)}:${judgeVersion}`;
   if (suggCache.key === cacheKey && Date.now() - suggCache.at < 30000) return suggCache.data;
   const dismissed = new Set((settings.dismissed || []).map(normT));
   const kwNorm = settings.keywords.map(normT);
-  const pressNorm = new Set(articles.map((a) => normT(a.press || '')).filter((p) => p.length >= 2));
+  const pressNorm = new Set(base.map((a) => normT(a.press || '')).filter((p) => p.length >= 2));
   const gOf = (k) => settings.groupOf[k] || '';
   const now = Date.now(), DAY = 864e5;
 
@@ -594,13 +604,13 @@ function buildSuggestions() {
   };
 
   const groups = [...new Set([...settings.groups, ...settings.keywords.filter((k) => !gOf(k)).map(() => '')])];
-  const total = articles.length;
+  const total = base.length;
   const dfAll = new Map();
-  for (const a of articles) for (const t of termsFor(a).all) dfAll.set(t, (dfAll.get(t) || 0) + 1);
+  for (const a of base) for (const t of termsFor(a).all) dfAll.set(t, (dfAll.get(t) || 0) + 1);
 
   const result = groups.map((g) => {
     const seeds = settings.keywords.filter((k) => gOf(k) === g);
-    const corpus = articles.filter((a) => a.keywords.some((k) => gOf(k) === g));
+    const corpus = base.filter((a) => a.keywords.some((k) => gOf(k) === g));
     const stat = new Map();
     for (const a of corpus) {
       const { all, inTitle } = termsFor(a);
@@ -658,7 +668,7 @@ function buildSuggestions() {
     return { group: g, seeds, articles: N, jointArticles, evidence: strict ? 'strong' : 'weak', items: list };
   });
 
-  const data = { generatedAt: now, groups: result, totalArticles: total };
+  const data = { generatedAt: now, groups: result, totalArticles: total, scope };
   suggCache = { key: cacheKey, at: Date.now(), data };
   return data;
 }
@@ -735,25 +745,28 @@ http.createServer(async (req, res) => {
       const b = await body(req);
       const group = String(b.group || '');
       if (group && !settings.groups.includes(group)) return json(res, 404, { error: '없는 카테고리입니다' });
-      try { return json(res, 200, { group, brief: await makeBrief(group, !!b.force), llm: llmStatus() }); }
+      const scope = b.scope === 'all' ? 'all' : 'today';
+      try { return json(res, 200, { group, scope, key: briefKey(group, scope), brief: await makeBrief(group, !!b.force, scope), llm: llmStatus() }); }
       catch (e) { return json(res, 502, { error: String(e.message || e), llm: llmStatus() }); }
     }
     if (u.pathname === '/api/llm/status' && req.method === 'GET') return json(res, 200, llmStatus());
     if (u.pathname === '/api/suggestions/judge' && req.method === 'POST') {       // 사용자가 버튼을 눌렀을 때만 외부(Gemini)로 전송
-      const groups = buildSuggestions().groups.map((x) => x.group);
+      const jb = await body(req), scope = jb.scope === 'all' ? 'all' : 'today';
+      const groups = buildSuggestions(scope).groups.map((x) => x.group);
       const results = [], errors = [];
       for (const g of groups) {
-        try { results.push({ group: g, ...(await judgeCandidates(g)) }); } catch (e) { errors.push(String(e.message || e)); break; }
+        try { results.push({ group: g, ...(await judgeCandidates(g, scope)) }); } catch (e) { errors.push(String(e.message || e)); break; }
       }
-      return json(res, 200, { ...buildSuggestions(), judge: { results, errors }, llm: llmStatus() });
+      return json(res, 200, { ...buildSuggestions(scope), judge: { results, errors }, llm: llmStatus() });
     }
-    if (u.pathname === '/api/suggestions' && req.method === 'GET') return json(res, 200, buildSuggestions());
+    if (u.pathname === '/api/suggestions' && req.method === 'GET') return json(res, 200, buildSuggestions(u.searchParams.get('scope')));
     if (u.pathname === '/api/suggestions/dismiss' && req.method === 'POST') {
-      const term = String((await body(req)).term || '').trim();
+      const db = await body(req);
+      const term = String(db.term || '').trim();
       if (term) { settings.dismissed = [...new Set([...(settings.dismissed || []), term])].slice(-500); saveSettings(); }
-      return json(res, 200, buildSuggestions());
+      return json(res, 200, buildSuggestions(db.scope));
     }
-    if (u.pathname === '/api/suggestions/reset' && req.method === 'POST') { settings.dismissed = []; saveSettings(); return json(res, 200, buildSuggestions()); }
+    if (u.pathname === '/api/suggestions/reset' && req.method === 'POST') { const rb = await body(req); settings.dismissed = []; saveSettings(); return json(res, 200, buildSuggestions(rb.scope)); }
     if (u.pathname === '/api/keywords' && req.method === 'POST') {
       const b = await body(req);
       // "a, b, c" 처럼 쉼표로 여러 개를 한 번에 등록할 수 있다
@@ -796,7 +809,7 @@ http.createServer(async (req, res) => {
     if (u.pathname === '/api/groups' && req.method === 'DELETE') {         // 그룹 삭제: 소속 키워드는 미분류로
       const name = u.searchParams.get('name');
       settings.groups = settings.groups.filter((g) => g !== name);
-      if (briefs[name]) { delete briefs[name]; saveBriefs(); }
+      if (briefs[name] || briefs[name + '#all']) { delete briefs[name]; delete briefs[name + '#all']; saveBriefs(); }
       for (const k of Object.keys(settings.groupOf)) if (settings.groupOf[k] === name) delete settings.groupOf[k];
       saveSettings();
       return jsonState(res);

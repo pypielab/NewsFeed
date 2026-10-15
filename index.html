@@ -67,7 +67,11 @@ button{cursor:pointer;border:0;background:none}
 .menu{width:36px;height:34px;border:1px solid var(--line);border-radius:7px;display:none;place-items:center;margin-right:auto}
 .view{flex:1;min-height:0;display:flex;flex-direction:column}
 .view[hidden]{display:none!important}
-.app.manage .srcs,.app.manage .srch,.app.settings .srcs,.app.settings .srch{display:none}
+.app.manage .srcs,.app.manage .srch,.app.settings .srcs,.app.settings .srch,.app.settings #todayWrap{display:none}
+.tgl{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;padding:4px 12px;border:1px solid var(--line);border-radius:999px;cursor:pointer;color:#5a617c;margin-right:auto}
+.tgl:has(input:checked){background:#eef1fb;border-color:var(--indigo);color:var(--indigo)}
+.tgl input{accent-color:var(--indigo);margin:0}
+.menu+.tgl{margin-right:0}
 .srcs{display:flex;gap:6px;flex-wrap:wrap}
 .srcs label{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:4px 10px;border:1px solid var(--line);border-radius:999px;cursor:pointer;color:#5a617c}
 .srcs label.err{border-color:var(--bad);color:var(--bad)}
@@ -250,6 +254,7 @@ h1 b{font-weight:800}
   <main class="main">
     <div class="top">
       <button class="menu" id="menuBtn" title="메뉴">☰</button>
+      <label class="tgl" id="todayWrap" title="켜면 오늘 0시 이후 기사만 보여주고, 브리핑·추천 키워드도 오늘 기사로 계산합니다"><input type="checkbox" id="today"> 오늘만</label>
       <div class="srcs" id="srcs"></div>
       <div class="srch"><input id="q" type="text" placeholder="결과 내 검색"></div>
       <select class="ivsel" id="iv" title="자동 수집 주기"><option value="30">30초</option><option value="60">1분</option><option value="180">3분</option><option value="300">5분</option><option value="600">10분</option></select>
@@ -341,6 +346,11 @@ const S = { keywords: [], groups: [], groupOf: {}, articles: [], labels: {}, sou
 try { S.open = new Set(JSON.parse(localStorage.openG || '[]')); } catch { /* 저장값 없음 */ }
 const saveOpen = () => { try { localStorage.openG = JSON.stringify([...S.open]); } catch { /* 무시 */ } };
 const IMP = '__imp';
+S.today = (() => { try { return localStorage.today !== '0'; } catch { return true; } })();   // 기본: 오늘만 보기
+const todayStart = () => new Date().setHours(0, 0, 0, 0);
+const P = () => (S.today ? S.articles.filter((a) => a.time >= todayStart()) : S.articles);          // 화면에 쓰는 기사 범위
+const scopeStr = () => (S.today ? 'today' : 'all');
+const bKey = (g) => (S.today ? g : g + '#all');
 const GP = '__g:';
 const gOf = (k) => S.groupOf[k] || '';
 const inGroup = (a, g) => a.keywords.some((k) => gOf(k) === g);
@@ -368,7 +378,7 @@ const hhmm = (t) => new Date(t).toLocaleTimeString('ko-KR', { hour: '2-digit', m
 
 function visible(anyKw) {
   const q = $('q').value.trim().toLowerCase();
-  return S.articles.filter((a) =>
+  return P().filter((a) =>
     (anyKw || !S.active || (S.active === IMP ? isImp(a) : S.active.startsWith(IMPP) ? impIn(a, S.active.slice(IMPP.length)) : S.active.startsWith(GP) ? inGroup(a, S.active.slice(GP.length)) : a.keywords.includes(S.active))) &&
     a.sources.some((s) => S.enabled[s] !== false) &&
     (!q || (a.title + a.summary + a.press).toLowerCase().includes(q)));
@@ -396,10 +406,10 @@ const briefGroup = () => {                                  // 지금 보는 필
 function renderBrief() {
   const box = $('brief'), g = briefGroup();
   if (g === null || S.view !== 'news') { box.innerHTML = ''; return; }
-  const name = g || '미분류', b = S.briefs[g];
-  const poolN = S.articles.filter((x) => inGroup(x, g)).length;
+  const name = g || '미분류', b = S.briefs[bKey(g)];
+  const poolN = P().filter((x) => inGroup(x, g)).length;
   const fresh = b ? poolN - b.count : 0;
-  const when = b ? `${ago(b.at)} 생성 · 기사 ${b.used}건 기준` : '';
+  const when = b ? `${ago(b.at)} 생성 · ${S.today ? '오늘 ' : ''}기사 ${b.used}건 기준` : '';
   let body = '';
   if (S.briefOpen) {
     if (b) {
@@ -427,8 +437,8 @@ $('brief').addEventListener('click', async (e) => {
   }
   S.briefBusy = true; renderBrief();
   try {
-    const r = await api('/api/briefing', 'POST', { group: g, force: true });
-    if (r.error) alert('브리핑 생성에 실패했습니다:\n' + r.error); else { S.briefs[g] = r.brief; S.briefOpen = true; }
+    const r = await api('/api/briefing', 'POST', { group: g, force: true, scope: scopeStr() });
+    if (r.error) alert('브리핑 생성에 실패했습니다:\n' + r.error); else { S.briefs[bKey(g)] = r.brief; S.briefOpen = true; }
     if (r.llm) llm = r.llm;
   } catch { alert('브리핑 요청에 실패했습니다.'); }
   S.briefBusy = false; renderBrief();
@@ -436,20 +446,20 @@ $('brief').addEventListener('click', async (e) => {
 
 function render() {
   // ----- 왼쪽 메뉴: 카테고리 드롭다운 -----
-  const cnt = (k) => S.articles.filter((x) => x.keywords.includes(k)).length;
-  const gcnt = (g) => S.articles.filter((x) => inGroup(x, g)).length;
+  const cnt = (k) => P().filter((x) => x.keywords.includes(k)).length;
+  const gcnt = (g) => P().filter((x) => inGroup(x, g)).length;
   const hasUng = S.keywords.some((k) => !gOf(k));
   const groups = [...S.groups, ...(hasUng ? [''] : [])];
   const gname = (g) => g || '미분류';
   const onNews = S.view === 'news';
-  const icnt = (g) => S.articles.filter((x) => impIn(x, g)).length;
+  const icnt = (g) => P().filter((x) => impIn(x, g)).length;
   const isOn = (k) => onNews && S.active === k;
   const impOpen = S.open.has(IMP) || (S.active || '').startsWith(IMP);
   $('rail').innerHTML =
-    `<button class="mi ${isOn('') || (onNews && !S.active) ? 'on' : ''}" data-k=""><span class="mname">전체</span><em>${S.articles.length}</em></button>` +
+    `<button class="mi ${isOn('') || (onNews && !S.active) ? 'on' : ''}" data-k=""><span class="mname">전체</span><em>${P().length}</em></button>` +
     // ★ 중요: 카테고리별로 나눠서 필터
     `<div class="mg imp ${impOpen ? 'open' : ''}">
-      <div class="mh ${isOn(IMP) ? 'on' : ''}" data-k="${IMP}" data-g="${IMP}" title="카테고리 안에서 키워드 2개 이상에 잡힌 기사"><span class="mname">★ 중요</span><em>${S.articles.filter(isImp).length}</em><i class="chev" data-gtoggle="${IMP}" title="카테고리별로 보기">▼</i></div>
+      <div class="mh ${isOn(IMP) ? 'on' : ''}" data-k="${IMP}" data-g="${IMP}" title="카테고리 안에서 키워드 2개 이상에 잡힌 기사"><span class="mname">★ 중요</span><em>${P().filter(isImp).length}</em><i class="chev" data-gtoggle="${IMP}" title="카테고리별로 보기">▼</i></div>
       <div class="mk-list">${groups.map((g) => `<button class="mk ${isOn(IMPP + g) ? 'on' : ''}" data-k="${esc(IMPP + g)}" title="${esc(gname(g))}의 중요 기사"><span class="mname">${esc(gname(g))}</span><em>${icnt(g)}</em></button>`).join('') || '<div class="mnone">카테고리 없음</div>'}</div>
     </div>` +
     `<div class="mlabel">카테고리</div>` +
@@ -486,12 +496,12 @@ function render() {
   }).join('');
 
   const list = visible();
-  $('stat').textContent = `${list.length}건 · 중복 제거됨`;
+  $('stat').textContent = `${list.length}건 · ${S.today ? '오늘 · ' : ''}중복 제거됨`;
 
   // 그리드
   const shown = list.slice(0, S.shown);
   $('grid').innerHTML = shown.map(cardHtml).join('') ||
-    `<div class="empty">${S.keywords.length ? '아직 오늘 수집된 기사가 없습니다.' : '키워드를 저장하면 뉴스 수집이 시작됩니다.'}</div>`;
+    `<div class="empty">${S.keywords.length ? (S.today ? '오늘 수집된 기사가 없습니다. 상단의 ‘오늘만’을 끄면 이전 기사를 볼 수 있습니다.' : '아직 수집된 기사가 없습니다.') : '키워드를 저장하면 뉴스 수집이 시작됩니다.'}</div>`;
   $('loadmore').hidden = list.length <= S.shown;
 
 }
@@ -500,7 +510,7 @@ let suggData = null;
 async function loadSugg(force) {
   if (!force && suggData && Date.now() - suggData.at < 15000) return renderSugg();
   $('sugg').innerHTML = '<span class="sub" style="margin:0">분석 중…</span>';
-  try { suggData = { at: Date.now(), ...(await api('/api/suggestions')) }; } catch { $('sugg').innerHTML = '<span class="sub" style="margin:0">불러오지 못했습니다.</span>'; return; }
+  try { suggData = { at: Date.now(), ...(await api('/api/suggestions?scope=' + scopeStr())) }; } catch { $('sugg').innerHTML = '<span class="sub" style="margin:0">불러오지 못했습니다.</span>'; return; }
   renderSugg();
 }
 function renderSugg() {
@@ -534,7 +544,7 @@ $('sugg').addEventListener('click', async (e) => {
     applyState(r); render(); suggData = null; loadSugg(true);
   } else if (no) {
     no.disabled = true;
-    suggData = { at: Date.now(), ...(await api('/api/suggestions/dismiss', 'POST', { term: no.dataset.sno })) }; renderSugg();
+    suggData = { at: Date.now(), ...(await api('/api/suggestions/dismiss', 'POST', { term: no.dataset.sno, scope: scopeStr() })) }; renderSugg();
   }
 });
 let llm = null, llmConfirmed = false;
@@ -553,7 +563,7 @@ $('suggAI').onclick = async () => {
   }
   const b = $('suggAI'); b.disabled = true; b.textContent = '판정 중…';
   try {
-    const r = await api('/api/suggestions/judge', 'POST');
+    const r = await api('/api/suggestions/judge', 'POST', { scope: scopeStr() });
     suggData = { at: Date.now(), ...r };
     if (r.llm) llm = r.llm;
     const errs = (r.judge && r.judge.errors) || [];
@@ -564,7 +574,7 @@ $('suggAI').onclick = async () => {
 };
 $('aiHide').onchange = renderSugg;
 $('suggReload').onclick = () => loadSugg(true);
-$('suggReset').onclick = async () => { suggData = { at: Date.now(), ...(await api('/api/suggestions/reset', 'POST')) }; renderSugg(); };
+$('suggReset').onclick = async () => { suggData = { at: Date.now(), ...(await api('/api/suggestions/reset', 'POST', { scope: scopeStr() })) }; renderSugg(); };
 
 function setView(v) {
   S.view = v;
@@ -815,6 +825,13 @@ $('chips').addEventListener('drop', async (e) => {
 });
 $('srcs').onchange = (e) => { S.enabled[e.target.dataset.s] = e.target.checked; render(); };
 $('q').oninput = () => { S.shown = 40; render(); };
+$('today').checked = S.today;
+$('today').onchange = () => {
+  S.today = $('today').checked;
+  try { localStorage.today = S.today ? '1' : '0'; } catch { /* 저장 불가 */ }
+  S.shown = 40; suggData = null; render();
+  if (S.view === 'manage') loadSugg(true);
+};
 $('refresh').onclick = () => api('/api/refresh', 'POST');
 $('iv').onchange = () => api('/api/interval', 'POST', { intervalSec: +$('iv').value });
 $('notif').onclick = async () => {
